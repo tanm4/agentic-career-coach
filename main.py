@@ -1,33 +1,53 @@
 from fastapi import FastAPI, Request
 from google.cloud import firestore
-import json
+import os
 
 app = FastAPI()
+
+# Firestore Client
 db = firestore.Client()
 
 # ---------------- MOCK JOB DATA ---------------- #
 
 JOBS = [
-    {"id": "1", "company": "Google", "title": "Software Intern", "location": "NYC", "url": "google.com"},
-    {"id": "2", "company": "Amazon", "title": "SDE Intern", "location": "Seattle", "url": "amazon.jobs"},
-    {"id": "3", "company": "Meta", "title": "ML Intern", "location": "NYC", "url": "meta.com"}
+    {
+        "id": "1",
+        "company": "Google",
+        "title": "Software Intern",
+        "location": "NYC",
+        "url": "https://careers.google.com"
+    },
+    {
+        "id": "2",
+        "company": "Amazon",
+        "title": "SDE Intern",
+        "location": "Seattle",
+        "url": "https://amazon.jobs"
+    },
+    {
+        "id": "3",
+        "company": "Meta",
+        "title": "ML Intern",
+        "location": "NYC",
+        "url": "https://www.metacareers.com"
+    }
 ]
 
-# ---------------- TOOL 1: FETCH JOBS ---------------- #
+# ---------------- TOOL 1 ---------------- #
 
 def fetch_jobs(params):
     role = params.get("role", "").lower()
     location = params.get("location", "").lower()
 
-    return {
-        "jobs": [
-            j for j in JOBS
-            if role in j["title"].lower()
-            and location in j["location"].lower()
-        ]
-    }
+    filtered = []
 
-# ---------------- TOOL 2: FIRESTORE PIPELINE ---------------- #
+    for job in JOBS:
+        if role in job["title"].lower() and location in job["location"].lower():
+            filtered.append(job)
+
+    return {"jobs": filtered}
+
+# ---------------- TOOL 2 ---------------- #
 
 def sync_pipeline(params):
     action = params.get("action")
@@ -44,17 +64,21 @@ def sync_pipeline(params):
         })
         return {"status": "created"}
 
-    if action == "update":
-        ref.update({"status": params.get("status")})
+    elif action == "update":
+        ref.update({
+            "status": params.get("status", "updated")
+        })
         return {"status": "updated"}
 
-    if action == "list":
+    elif action == "list":
         docs = db.collection("applications").stream()
-        return {"applications": [d.to_dict() for d in docs]}
+        return {
+            "applications": [doc.to_dict() for doc in docs]
+        }
 
-    return {"error": "invalid action"}
+    return {"error": "Invalid action"}
 
-# ---------------- MCP ENDPOINT ---------------- #
+# ---------------- MCP ROUTE ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
@@ -66,13 +90,15 @@ async def mcp(request: Request):
     if method == "fetch_jobs":
         return fetch_jobs(params)
 
-    if method == "sync_pipeline":
+    elif method == "sync_pipeline":
         return sync_pipeline(params)
 
-    return {"error": "unknown method"}
+    return {"error": "Unknown method"}
 
 # ---------------- HEALTH CHECK ---------------- #
 
 @app.get("/")
-def home():
-    return {"status": "MCP server running"}
+def root():
+    return {
+        "status": "MCP Server Running"
+    }

@@ -1,4 +1,4 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sse-starlette
 google-cloud-firestore
