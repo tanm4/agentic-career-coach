@@ -1,8 +1,12 @@
+import os
 from fastapi import FastAPI
 from google.cloud import firestore
+
 from mcp.server.fastapi import MCPServer
 
 app = FastAPI()
+
+# MCP wrapper
 mcp = MCPServer(app)
 
 db = firestore.Client()
@@ -64,11 +68,25 @@ def fetch_jobs_tool(role: str = "", location: str = ""):
 def sync_pipeline_tool(action: str, job_id: str = "", company: str = "", title: str = "", status: str = ""):
     return sync_pipeline(action, job_id, company, title, status)
 
-# IMPORTANT: enables /sse + MCP protocol
+# IMPORTANT: mounts MCP + enables /sse
 mcp.mount(app)
 
-# ---------------- HEALTH ---------------- #
+# ---------------- ROOT HEALTH ---------------- #
 
 @app.get("/")
 def root():
     return {"status": "MCP Server Running"}
+
+
+# ---------------- CLOUD RUN ENTRYPOINT FIX ---------------- #
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8080))
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port
+    )
