@@ -1,16 +1,18 @@
 import os
+import uvicorn
 from fastapi import FastAPI
 from google.cloud import firestore
 
-from mcp.server.fastapi import FastApiMCP
+from mcp.server.fastapi import MCPServer
+
+# ---------------- APP ---------------- #
 
 app = FastAPI()
-
 db = firestore.Client()
 
-# ---------------- MCP SETUP (FIXED) ---------------- #
+# ---------------- MCP SETUP (CORRECT) ---------------- #
 
-mcp = FastApiMCP(app)
+mcp = MCPServer(app)
 
 # ---------------- DATA ---------------- #
 
@@ -41,7 +43,12 @@ def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str =
     ref = db.collection("applications").document(job_id)
 
     if action == "create":
-        ref.set({"job_id": job_id, "company": company, "title": title, "status": "saved"})
+        ref.set({
+            "job_id": job_id,
+            "company": company,
+            "title": title,
+            "status": "saved"
+        })
         return {"status": "created"}
 
     if action == "update":
@@ -55,12 +62,22 @@ def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str =
 
     return {"error": "invalid action"}
 
-# ---------------- HEALTH ---------------- #
+# ---------------- ROUTES ---------------- #
 
 @app.get("/")
 def root():
     return {"status": "MCP Server Running"}
 
-# ---------------- CRITICAL FIX ---------------- #
+# IMPORTANT: explicitly mount MCP routes
+mcp.mount(app)
 
-mcp.mount()
+# ---------------- CLOUD RUN ENTRYPOINT ---------------- #
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port
+    )
