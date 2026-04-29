@@ -5,14 +5,8 @@ from google.cloud import firestore
 
 from mcp.server.fastapi import MCPServer
 
-# ---------------- APP ---------------- #
-
 app = FastAPI()
 db = firestore.Client()
-
-# ---------------- MCP SETUP (CORRECT) ---------------- #
-
-mcp = MCPServer(app)
 
 # ---------------- DATA ---------------- #
 
@@ -22,7 +16,9 @@ JOBS = [
     {"id": "3", "company": "Meta", "title": "ML Intern", "location": "NYC"},
 ]
 
-# ---------------- TOOLS ---------------- #
+# ---------------- MCP ---------------- #
+
+mcp = MCPServer(app)
 
 @mcp.tool()
 def fetch_jobs(role: str = "", location: str = ""):
@@ -37,18 +33,12 @@ def fetch_jobs(role: str = "", location: str = ""):
         ]
     }
 
-
 @mcp.tool()
 def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str = "", status: str = ""):
     ref = db.collection("applications").document(job_id)
 
     if action == "create":
-        ref.set({
-            "job_id": job_id,
-            "company": company,
-            "title": title,
-            "status": "saved"
-        })
+        ref.set({"job_id": job_id, "company": company, "title": title, "status": "saved"})
         return {"status": "created"}
 
     if action == "update":
@@ -62,22 +52,19 @@ def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str =
 
     return {"error": "invalid action"}
 
-# ---------------- ROUTES ---------------- #
+# IMPORTANT: mount MCP BEFORE anything else
+mcp.mount(app)
+
+# ---------------- HEALTH ---------------- #
 
 @app.get("/")
 def root():
     return {"status": "MCP Server Running"}
 
-# IMPORTANT: explicitly mount MCP routes
-mcp.mount(app)
-
-# ---------------- CLOUD RUN ENTRYPOINT ---------------- #
+# ---------------- CRITICAL CLOUD RUN FIX ---------------- #
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
 
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port
-    )
+    # IMPORTANT: no import string, direct app reference
+    uvicorn.run(app, host="0.0.0.0", port=port)
