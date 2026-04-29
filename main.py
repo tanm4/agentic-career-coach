@@ -1,7 +1,9 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from google.cloud import firestore
+from mcp.server.fastapi import MCPServer
 
 app = FastAPI()
+mcp = MCPServer(app)
 
 db = firestore.Client()
 
@@ -15,9 +17,9 @@ JOBS = [
 
 # ---------------- CORE LOGIC ---------------- #
 
-def fetch_jobs(params):
-    role = (params.get("role") or "").lower()
-    location = (params.get("location") or "").lower()
+def fetch_jobs(role: str = "", location: str = ""):
+    role = role.lower()
+    location = location.lower()
 
     return {
         "jobs": [
@@ -28,23 +30,20 @@ def fetch_jobs(params):
     }
 
 
-def sync_pipeline(params):
-    action = params.get("action")
-    job_id = params.get("job_id")
-
+def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str = "", status: str = ""):
     ref = db.collection("applications").document(job_id)
 
     if action == "create":
         ref.set({
             "job_id": job_id,
-            "company": params.get("company"),
-            "title": params.get("title"),
+            "company": company,
+            "title": title,
             "status": "saved"
         })
         return {"status": "created"}
 
     if action == "update":
-        ref.update({"status": params.get("status", "updated")})
+        ref.update({"status": status or "updated"})
         return {"status": "updated"}
 
     if action == "list":
@@ -54,58 +53,19 @@ def sync_pipeline(params):
 
     return {"error": "invalid action"}
 
-# ---------------- MCP: TOOL DISCOVERY ---------------- #
+# ---------------- MCP TOOLS ---------------- #
 
-@app.get("/tools")
-def tools():
-    return {
-        "tools": [
-            {
-                "name": "fetch_jobs",
-                "description": "Fetch job listings filtered by role and location",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "role": {"type": "string"},
-                        "location": {"type": "string"}
-                    }
-                }
-            },
-            {
-                "name": "sync_pipeline",
-                "description": "Create, update, or list job applications in Firestore",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string"},
-                        "job_id": {"type": "string"},
-                        "company": {"type": "string"},
-                        "title": {"type": "string"},
-                        "status": {"type": "string"}
-                    }
-                }
-            }
-        ]
-    }
+@mcp.tool()
+def fetch_jobs_tool(role: str = "", location: str = ""):
+    return fetch_jobs(role, location)
 
-# ---------------- MCP: TOOL EXECUTION (STANDARDIZED) ---------------- #
 
-@app.post("/invoke")
-async def invoke(request: Request):
-    body = await request.json()
+@mcp.tool()
+def sync_pipeline_tool(action: str, job_id: str = "", company: str = "", title: str = "", status: str = ""):
+    return sync_pipeline(action, job_id, company, title, status)
 
-    tool_name = body.get("name") or body.get("tool")
-    params = body.get("arguments") or body.get("params") or {}
-
-    if tool_name == "fetch_jobs":
-        return fetch_jobs(params)
-
-    if tool_name == "sync_pipeline":
-        return sync_pipeline(params)
-
-    return {
-        "error": f"Unknown tool: {tool_name}"
-    }
+# IMPORTANT: enables /sse + MCP protocol
+mcp.mount(app)
 
 # ---------------- HEALTH ---------------- #
 
