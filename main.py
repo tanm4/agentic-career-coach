@@ -1,52 +1,31 @@
 from fastapi import FastAPI, Request
 from google.cloud import firestore
-import os
 
 app = FastAPI()
 
-# ---------------- FIRESTORE ---------------- #
-
 db = firestore.Client()
 
-# ---------------- MOCK JOB DATA ---------------- #
+# ---------------- DATA ---------------- #
 
 JOBS = [
-    {
-        "id": "1",
-        "company": "Google",
-        "title": "Software Intern",
-        "location": "NYC",
-        "url": "https://careers.google.com"
-    },
-    {
-        "id": "2",
-        "company": "Amazon",
-        "title": "SDE Intern",
-        "location": "Seattle",
-        "url": "https://amazon.jobs"
-    },
-    {
-        "id": "3",
-        "company": "Meta",
-        "title": "ML Intern",
-        "location": "NYC",
-        "url": "https://www.metacareers.com"
-    }
+    {"id": "1", "company": "Google", "title": "Software Intern", "location": "NYC", "url": "https://careers.google.com"},
+    {"id": "2", "company": "Amazon", "title": "SDE Intern", "location": "Seattle", "url": "https://amazon.jobs"},
+    {"id": "3", "company": "Meta", "title": "ML Intern", "location": "NYC", "url": "https://metacareers.com"},
 ]
 
-# ---------------- TOOL LOGIC ---------------- #
+# ---------------- CORE LOGIC ---------------- #
 
 def fetch_jobs(params):
     role = (params.get("role") or "").lower()
     location = (params.get("location") or "").lower()
 
-    filtered = []
-
-    for job in JOBS:
-        if role in job["title"].lower() and location in job["location"].lower():
-            filtered.append(job)
-
-    return {"jobs": filtered}
+    return {
+        "jobs": [
+            job for job in JOBS
+            if role in job["title"].lower()
+            and location in job["location"].lower()
+        ]
+    }
 
 
 def sync_pipeline(params):
@@ -64,21 +43,18 @@ def sync_pipeline(params):
         })
         return {"status": "created"}
 
-    elif action == "update":
-        ref.update({
-            "status": params.get("status", "updated")
-        })
+    if action == "update":
+        ref.update({"status": params.get("status", "updated")})
         return {"status": "updated"}
 
-    elif action == "list":
-        docs = db.collection("applications").stream()
+    if action == "list":
         return {
-            "applications": [doc.to_dict() for doc in docs]
+            "applications": [doc.to_dict() for doc in db.collection("applications").stream()]
         }
 
-    return {"error": "Invalid action"}
+    return {"error": "invalid action"}
 
-# ---------------- MCP TOOL REGISTRY ---------------- #
+# ---------------- MCP: TOOL DISCOVERY ---------------- #
 
 @app.get("/tools")
 def tools():
@@ -86,7 +62,7 @@ def tools():
         "tools": [
             {
                 "name": "fetch_jobs",
-                "description": "Fetch jobs filtered by role and location",
+                "description": "Fetch job listings filtered by role and location",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -112,24 +88,26 @@ def tools():
         ]
     }
 
-# ---------------- MCP TOOL EXECUTION ---------------- #
+# ---------------- MCP: TOOL EXECUTION (STANDARDIZED) ---------------- #
 
 @app.post("/invoke")
 async def invoke(request: Request):
     body = await request.json()
 
-    tool = body.get("tool")
-    params = body.get("params", {})
+    tool_name = body.get("name") or body.get("tool")
+    params = body.get("arguments") or body.get("params") or {}
 
-    if tool == "fetch_jobs":
+    if tool_name == "fetch_jobs":
         return fetch_jobs(params)
 
-    if tool == "sync_pipeline":
+    if tool_name == "sync_pipeline":
         return sync_pipeline(params)
 
-    return {"error": f"Unknown tool: {tool}"}
+    return {
+        "error": f"Unknown tool: {tool_name}"
+    }
 
-# ---------------- HEALTH CHECK ---------------- #
+# ---------------- HEALTH ---------------- #
 
 @app.get("/")
 def root():
