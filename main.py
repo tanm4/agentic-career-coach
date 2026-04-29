@@ -4,7 +4,8 @@ import os
 
 app = FastAPI()
 
-# Firestore Client
+# ---------------- FIRESTORE ---------------- #
+
 db = firestore.Client()
 
 # ---------------- MOCK JOB DATA ---------------- #
@@ -33,11 +34,11 @@ JOBS = [
     }
 ]
 
-# ---------------- TOOL 1 ---------------- #
+# ---------------- TOOL LOGIC ---------------- #
 
 def fetch_jobs(params):
-    role = params.get("role", "").lower()
-    location = params.get("location", "").lower()
+    role = (params.get("role") or "").lower()
+    location = (params.get("location") or "").lower()
 
     filtered = []
 
@@ -47,7 +48,6 @@ def fetch_jobs(params):
 
     return {"jobs": filtered}
 
-# ---------------- TOOL 2 ---------------- #
 
 def sync_pipeline(params):
     action = params.get("action")
@@ -78,27 +78,59 @@ def sync_pipeline(params):
 
     return {"error": "Invalid action"}
 
-# ---------------- MCP ROUTE ---------------- #
+# ---------------- MCP TOOL REGISTRY ---------------- #
 
-@app.post("/mcp")
-async def mcp(request: Request):
+@app.get("/tools")
+def tools():
+    return {
+        "tools": [
+            {
+                "name": "fetch_jobs",
+                "description": "Fetch jobs filtered by role and location",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "location": {"type": "string"}
+                    }
+                }
+            },
+            {
+                "name": "sync_pipeline",
+                "description": "Create, update, or list job applications in Firestore",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "job_id": {"type": "string"},
+                        "company": {"type": "string"},
+                        "title": {"type": "string"},
+                        "status": {"type": "string"}
+                    }
+                }
+            }
+        ]
+    }
+
+# ---------------- MCP TOOL EXECUTION ---------------- #
+
+@app.post("/invoke")
+async def invoke(request: Request):
     body = await request.json()
 
-    method = body.get("method")
+    tool = body.get("tool")
     params = body.get("params", {})
 
-    if method == "fetch_jobs":
+    if tool == "fetch_jobs":
         return fetch_jobs(params)
 
-    elif method == "sync_pipeline":
+    if tool == "sync_pipeline":
         return sync_pipeline(params)
 
-    return {"error": "Unknown method"}
+    return {"error": f"Unknown tool: {tool}"}
 
 # ---------------- HEALTH CHECK ---------------- #
 
 @app.get("/")
 def root():
-    return {
-        "status": "MCP Server Running"
-    }
+    return {"status": "MCP Server Running"}
