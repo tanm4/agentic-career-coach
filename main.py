@@ -16,7 +16,7 @@ JOBS = [
 
 # ---------------- TOOLS ---------------- #
 
-def fetch_jobs(role: str = "", location: str = ""):
+def fetch_jobs(role="", location=""):
     role = role.lower()
     location = location.lower()
 
@@ -28,8 +28,7 @@ def fetch_jobs(role: str = "", location: str = ""):
         ]
     }
 
-
-def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str = "", status: str = ""):
+def sync_pipeline(action, job_id="", company="", title="", status=""):
     ref = db.collection("applications").document(job_id)
 
     if action == "create":
@@ -47,86 +46,119 @@ def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str =
 
     if action == "list":
         return {
-            "applications": [d.to_dict() for d in db.collection("applications").stream()]
+            "applications": [
+                d.to_dict() for d in db.collection("applications").stream()
+            ]
         }
 
     return {"error": "invalid action"}
-
 
 TOOLS = {
     "fetch_jobs": fetch_jobs,
     "sync_pipeline": sync_pipeline
 }
 
-# ---------------- MCP: TOOL DISCOVERY ---------------- #
-
-@app.get("/tools")
-def tools():
-    return {
-        "tools": [
-            {
-                "name": name,
-                "description": func.__doc__ or "No description",
-                "input_schema": {}
-            }
-            for name, func in TOOLS.items()
-        ]
-    }
-
-# ---------------- MCP: JSON-RPC CORE ---------------- #
+# ---------------- MCP ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
     body = await request.json()
 
     method = body.get("method")
+    req_id = body.get("id")
     params = body.get("params", {})
-    tool_name = body.get("params", {}).get("name")
-    args = body.get("params", {}).get("arguments", {})
 
-    # ---- TOOL CALL ---- #
-    if method == "tools/call":
-        if tool_name in TOOLS:
-            result = TOOLS[tool_name](**args)
-            return {
-                "jsonrpc": "2.0",
-                "id": body.get("id"),
-                "result": result
+    # ---------------- initialize ---------------- #
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "career-coach-mcp",
+                    "version": "1.0.0"
+                }
             }
+        }
 
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Unknown tool"}
-        )
-
-    # ---- LIST TOOLS ---- #
+    # ---------------- list tools ---------------- #
     if method == "tools/list":
         return {
             "jsonrpc": "2.0",
-            "id": body.get("id"),
+            "id": req_id,
             "result": {
                 "tools": [
-                    {"name": k} for k in TOOLS.keys()
+                    {
+                        "name": "fetch_jobs",
+                        "description": "Find internships/jobs",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string"},
+                                "location": {"type": "string"}
+                            }
+                        }
+                    },
+                    {
+                        "name": "sync_pipeline",
+                        "description": "Track applications",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string"},
+                                "job_id": {"type": "string"},
+                                "company": {"type": "string"},
+                                "title": {"type": "string"},
+                                "status": {"type": "string"}
+                            }
+                        }
+                    }
                 ]
             }
         }
 
+    # ---------------- call tool ---------------- #
+    if method == "tools/call":
+        tool = params.get("name")
+        args = params.get("arguments", {})
+
+        if tool in TOOLS:
+            result = TOOLS[tool](**args)
+
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(result)
+                        }
+                    ]
+                }
+            }
+
     return JSONResponse(
         status_code=400,
-        content={"error": "Unknown method"}
+        content={"error": "Unknown MCP method"}
     )
 
-# ---------------- SSE (REQUIRED FOR REAL MCP CLIENTS) ---------------- #
+# ---------------- SSE ---------------- #
 
 @app.get("/sse")
 async def sse():
-    async def event_stream():
-        yield f"data: {json.dumps({'status': 'connected'})}\n\n"
+    async def stream():
+        while True:
+            yield "data: connected\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
-# ---------------- HEALTH ---------------- #
+# ---------------- ROOT ---------------- #
 
 @app.get("/")
 def root():
-    return {"status": "FULL MCP SERVER RUNNING"}
+    return {"status": "MCP READY"}
