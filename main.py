@@ -1,84 +1,104 @@
+from fastapi import FastAPI, Request
+from google.cloud import firestore
 import os
-from fastapi import FastAPI
 
 app = FastAPI()
 
-# ---------------- SAFE FIRESTORE INIT ---------------- #
+# Firestore Client
+db = firestore.Client()
 
-db = None
-
-def get_db():
-    global db
-    if db is None:
-        from google.cloud import firestore
-        db = firestore.Client()
-    return db
-
-# ---------------- DATA ---------------- #
+# ---------------- MOCK JOB DATA ---------------- #
 
 JOBS = [
-    {"id": "1", "company": "Google", "title": "Software Intern", "location": "NYC"},
-    {"id": "2", "company": "Amazon", "title": "SDE Intern", "location": "Seattle"},
-    {"id": "3", "company": "Meta", "title": "ML Intern", "location": "NYC"},
+    {
+        "id": "1",
+        "company": "Google",
+        "title": "Software Intern",
+        "location": "NYC",
+        "url": "https://careers.google.com"
+    },
+    {
+        "id": "2",
+        "company": "Amazon",
+        "title": "SDE Intern",
+        "location": "Seattle",
+        "url": "https://amazon.jobs"
+    },
+    {
+        "id": "3",
+        "company": "Meta",
+        "title": "ML Intern",
+        "location": "NYC",
+        "url": "https://www.metacareers.com"
+    }
 ]
 
-# ---------------- MCP ---------------- #
+# ---------------- TOOL 1 ---------------- #
 
-from mcp.server.fastapi import MCPServer
+def fetch_jobs(params):
+    role = params.get("role", "").lower()
+    location = params.get("location", "").lower()
 
-mcp = MCPServer(app)
+    filtered = []
 
-@mcp.tool()
-def fetch_jobs(role: str = "", location: str = ""):
-    role = role.lower()
-    location = location.lower()
+    for job in JOBS:
+        if role in job["title"].lower() and location in job["location"].lower():
+            filtered.append(job)
 
-    return {
-        "jobs": [
-            j for j in JOBS
-            if role in j["title"].lower()
-            and location in j["location"].lower()
-        ]
-    }
+    return {"jobs": filtered}
 
-@mcp.tool()
-def sync_pipeline(action: str, job_id: str = "", company: str = "", title: str = "", status: str = ""):
-    db = get_db()
+# ---------------- TOOL 2 ---------------- #
+
+def sync_pipeline(params):
+    action = params.get("action")
+    job_id = params.get("job_id")
+
     ref = db.collection("applications").document(job_id)
 
     if action == "create":
         ref.set({
             "job_id": job_id,
-            "company": company,
-            "title": title,
+            "company": params.get("company"),
+            "title": params.get("title"),
             "status": "saved"
         })
         return {"status": "created"}
 
-    if action == "update":
-        ref.update({"status": status})
+    elif action == "update":
+        ref.update({
+            "status": params.get("status", "updated")
+        })
         return {"status": "updated"}
 
-    if action == "list":
+    elif action == "list":
+        docs = db.collection("applications").stream()
         return {
-            "applications": [d.to_dict() for d in db.collection("applications").stream()]
+            "applications": [doc.to_dict() for doc in docs]
         }
 
-    return {"error": "invalid action"}
+    return {"error": "Invalid action"}
 
-# ---------------- MOUNT MCP ---------------- #
+# ---------------- MCP ROUTE ---------------- #
 
-mcp.mount(app)
+@app.post("/mcp")
+async def mcp(request: Request):
+    body = await request.json()
 
-# ---------------- HEALTH ---------------- #
+    method = body.get("method")
+    params = body.get("params", {})
+
+    if method == "fetch_jobs":
+        return fetch_jobs(params)
+
+    elif method == "sync_pipeline":
+        return sync_pipeline(params)
+
+    return {"error": "Unknown method"}
+
+# ---------------- HEALTH CHECK ---------------- #
 
 @app.get("/")
 def root():
-    return {"status": "MCP Server Running"}
-
-# ---------------- CLOUD RUN SAFETY ---------------- #
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    return {
+        "status": "MCP Server Running"
+    }
