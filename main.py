@@ -12,43 +12,93 @@ try:
 except Exception:
     db = None
 
-# ---------------- REAL-TIME JOB FETCH ---------------- #
+# ---------------- LOCATION HELPERS ---------------- #
+
+def normalize(text: str):
+    return (text or "").lower().strip()
+
+
+US_CITY_ALIASES = {
+    "nyc": "new york",
+    "new york": "new york",
+    "new york city": "new york",
+    "sf": "san francisco",
+    "san francisco": "san francisco",
+    "la": "los angeles",
+    "los angeles": "los angeles",
+    "seattle": "seattle",
+    "austin": "austin",
+    "chicago": "chicago",
+}
+
+
+def match_location(job_location: str, user_location: str):
+    if not user_location:
+        return True
+
+    job_loc = normalize(job_location)
+    user_loc = normalize(user_location)
+
+    user_loc = US_CITY_ALIASES.get(user_loc, user_loc)
+
+    # broad matches from API
+    if "worldwide" in job_loc or "anywhere" in job_loc:
+        return True
+
+    if "usa" in job_loc and "usa" in user_loc:
+        return True
+
+    return user_loc in job_loc or job_loc in user_loc
+
+
+# ---------------- REAL-TIME JOB TOOL ---------------- #
 
 def fetch_jobs(role="", location=""):
-    """
-    Fetch REAL jobs from Remotive API (live data)
-    """
     try:
-        url = "https://remotive.com/api/remote-jobs"
-        res = requests.get(url, timeout=5)
+        res = requests.get(
+            "https://remotive.com/api/remote-jobs",
+            timeout=8
+        )
         data = res.json()
 
         jobs = data.get("jobs", [])
 
-        # filter live data
-        filtered = []
-        for j in jobs:
-            title = j.get("title", "").lower()
+        role = normalize(role)
+        location = normalize(location)
 
-            if role.lower() in title:
-                filtered.append({
-                    "title": j.get("title"),
-                    "company": j.get("company_name"),
-                    "location": j.get("candidate_required_location"),
-                    "url": j.get("url")
+        results = []
+
+        for job in jobs:
+            title = normalize(job.get("title", ""))
+            job_location = job.get("candidate_required_location", "")
+
+            role_ok = role in title if role else True
+            location_ok = match_location(job_location, location)
+
+            if role_ok and location_ok:
+                results.append({
+                    "title": job.get("title"),
+                    "company": job.get("company_name"),
+                    "location": job_location,
+                    "url": job.get("url")
                 })
 
         return {
-            "count": len(filtered),
-            "jobs": filtered[:10],
+            "count": len(results),
+            "filters": {
+                "role": role or "any",
+                "location": location or "any"
+            },
+            "jobs": results[:10],
             "updated_at": datetime.utcnow().isoformat()
         }
 
     except Exception as e:
         return {
-            "error": "job fetch failed",
+            "error": "job_fetch_failed",
             "details": str(e)
         }
+
 
 # ---------------- APPLICATION TRACKING ---------------- #
 
@@ -81,19 +131,22 @@ def sync_pipeline(action="", job_id="", company="", title="", status=""):
 
     return {"error": "invalid action"}
 
-# ---------------- TOOLS REGISTRY ---------------- #
+
+# ---------------- TOOLS ---------------- #
 
 TOOLS = {
     "fetch_jobs": fetch_jobs,
     "sync_pipeline": sync_pipeline
 }
 
-# ---------------- MCP SERVER ---------------- #
+
+# ---------------- MCP ENDPOINT ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
     try:
         body = await request.json()
+
         method = body.get("method")
         req_id = body.get("id")
         params = body.get("params", {})
@@ -108,7 +161,7 @@ async def mcp(request: Request):
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "career-mcp",
-                        "version": "2.0.0"
+                        "version": "3.0.0"
                     }
                 }
             }
@@ -159,57 +212,55 @@ async def mcp(request: Request):
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "content": [{"type": "text", "text": "Unknown tool"}],
-                        "isError": True
-                    }
-                }
-
-            try:
-                result = TOOLS[name](**args)
-
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
                         "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps(result, indent=2)
-                            }
-                        ],
-                        "isError": False
-                    }
-                }
-
-            except Exception as e:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": [
-                            {"type": "text", "text": str(e)}
+                            {"type": "text", "text": "Unknown tool"}
                         ],
                         "isError": True
                     }
                 }
 
+            result = TOOLS[name](**args)
+
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(result, indent=2)
+                        }
+                    ],
+                    "isError": False
+                }
+            }
+
+        # ---------------- FALLBACK ---------------- #
         return {
             "jsonrpc": "2.0",
             "id": req_id,
-            "error": {"code": -32601, "message": "Method not found"}
+            "error": {
+                "code": -32601,
+                "message": "Method not found"
+            }
         }
 
     except Exception as e:
         return {
             "jsonrpc": "2.0",
             "id": None,
-            "error": {"code": -32000, "message": str(e)}
+            "error": {
+                "code": -32000,
+                "message": str(e)
+            }
         }
 
-# ---------------- HEALTH ---------------- #
+
+# ---------------- HEALTH CHECK ---------------- #
 @app.get("/")
 def root():
     return {
         "status": "MCP RUNNING",
-        "mode": "REAL-TIME JOB API"
+        "version": "3.0.0",
+        "mode": "REAL-TIME JOB SEARCH ENABLED"
     }
