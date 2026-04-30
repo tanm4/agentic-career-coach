@@ -1,3 +1,4 @@
+import os
 import json
 import requests
 from fastapi import FastAPI, Request
@@ -12,90 +13,70 @@ try:
 except Exception:
     db = None
 
-# ---------------- LOCATION HELPERS ---------------- #
+# ---------------- ADZUNA CONFIG ---------------- #
+ADZUNA_APP_ID = "723844d0"
+ADZUNA_APP_KEY = "c06ef9a282048c61a5acf06a754c30a2"
+
+# ---------------- NORMALIZATION ---------------- #
 
 def normalize(text: str):
     return (text or "").lower().strip()
 
 
-US_CITY_ALIASES = {
-    "nyc": "new york",
-    "new york": "new york",
-    "new york city": "new york",
-    "sf": "san francisco",
-    "san francisco": "san francisco",
-    "la": "los angeles",
-    "los angeles": "los angeles",
-    "seattle": "seattle",
-    "austin": "austin",
-    "chicago": "chicago",
-}
+# ---------------- GEO JOB SEARCH (REAL) ---------------- #
 
+def fetch_jobs(role="", location="new york"):
+    """
+    Real geo-based job search using Adzuna API
+    """
 
-def match_location(job_location: str, user_location: str):
-    if not user_location:
-        return True
+    if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
+        return {
+            "error": "Missing ADZUNA_APP_ID or ADZUNA_APP_KEY"
+        }
 
-    job_loc = normalize(job_location)
-    user_loc = normalize(user_location)
+    role = role or "software engineer"
+    location = location or "new york"
 
-    user_loc = US_CITY_ALIASES.get(user_loc, user_loc)
-
-    # broad matches from API
-    if "worldwide" in job_loc or "anywhere" in job_loc:
-        return True
-
-    if "usa" in job_loc and "usa" in user_loc:
-        return True
-
-    return user_loc in job_loc or job_loc in user_loc
-
-
-# ---------------- REAL-TIME JOB TOOL ---------------- #
-
-def fetch_jobs(role="", location=""):
     try:
-        res = requests.get(
-            "https://remotive.com/api/remote-jobs",
-            timeout=8
+        url = (
+            f"https://api.adzuna.com/v1/api/jobs/us/search/1"
+            f"?app_id={ADZUNA_APP_ID}"
+            f"&app_key={ADZUNA_APP_KEY}"
+            f"&what={role}"
+            f"&where={location}"
+            f"&results_per_page=10"
+            f"&content-type=application/json"
         )
+
+        res = requests.get(url, timeout=10)
         data = res.json()
-
-        jobs = data.get("jobs", [])
-
-        role = normalize(role)
-        location = normalize(location)
 
         results = []
 
-        for job in jobs:
-            title = normalize(job.get("title", ""))
-            job_location = job.get("candidate_required_location", "")
-
-            role_ok = role in title if role else True
-            location_ok = match_location(job_location, location)
-
-            if role_ok and location_ok:
-                results.append({
-                    "title": job.get("title"),
-                    "company": job.get("company_name"),
-                    "location": job_location,
-                    "url": job.get("url")
-                })
+        for job in data.get("results", []):
+            results.append({
+                "title": job.get("title"),
+                "company": job.get("company", {}).get("display_name"),
+                "location": job.get("location", {}).get("display_name"),
+                "salary_min": job.get("salary_min"),
+                "salary_max": job.get("salary_max"),
+                "url": job.get("redirect_url")
+            })
 
         return {
-            "count": len(results),
-            "filters": {
-                "role": role or "any",
-                "location": location or "any"
+            "query": {
+                "role": role,
+                "location": location
             },
-            "jobs": results[:10],
+            "count": len(results),
+            "jobs": results,
             "updated_at": datetime.utcnow().isoformat()
         }
 
     except Exception as e:
         return {
-            "error": "job_fetch_failed",
+            "error": "adzuna_fetch_failed",
             "details": str(e)
         }
 
@@ -151,7 +132,7 @@ async def mcp(request: Request):
         req_id = body.get("id")
         params = body.get("params", {})
 
-        # ---------------- INIT ---------------- #
+        # ---------------- INITIALIZE ---------------- #
         if method == "initialize":
             return {
                 "jsonrpc": "2.0",
@@ -161,7 +142,7 @@ async def mcp(request: Request):
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "career-mcp",
-                        "version": "3.0.0"
+                        "version": "5.0.0"
                     }
                 }
             }
@@ -175,7 +156,7 @@ async def mcp(request: Request):
                     "tools": [
                         {
                             "name": "fetch_jobs",
-                            "description": "Get real-time remote jobs",
+                            "description": "Find real location-based jobs using Adzuna API",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -212,14 +193,41 @@ async def mcp(request: Request):
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "content": [
-                            {"type": "text", "text": "Unknown tool"}
-                        ],
+                        "content": [{
+                            "type": "text",
+                            "text": "Unknown tool"
+                        }],
                         "isError": True
                     }
                 }
 
             result = TOOLS[name](**args)
+
+            # ---------------- AGENT-STUDIO SAFE OUTPUT ---------------- #
+            if name == "fetch_jobs":
+                jobs = result.get("jobs", [])
+
+                if not jobs:
+                    text = f"""
+No exact matches found for:
+Role: {result.get('query', {}).get('role')}
+Location: {result.get('query', {}).get('location')}
+
+Try broadening your search (e.g., "software", "engineer", or nearby cities).
+"""
+                else:
+                    text = f"""
+Found {len(jobs)} real jobs via Adzuna:
+
+""" + "\n".join(
+    f"- {j['title']} at {j['company']} ({j['location']})"
+    for j in jobs[:10]
+)
+
+                response_text = text
+
+            else:
+                response_text = json.dumps(result, indent=2)
 
             return {
                 "jsonrpc": "2.0",
@@ -228,7 +236,7 @@ async def mcp(request: Request):
                     "content": [
                         {
                             "type": "text",
-                            "text": json.dumps(result, indent=2)
+                            "text": response_text
                         }
                     ],
                     "isError": False
@@ -256,11 +264,11 @@ async def mcp(request: Request):
         }
 
 
-# ---------------- HEALTH CHECK ---------------- #
+# ---------------- HEALTH ---------------- #
 @app.get("/")
 def root():
     return {
         "status": "MCP RUNNING",
-        "version": "3.0.0",
-        "mode": "REAL-TIME JOB SEARCH ENABLED"
+        "version": "5.0.0",
+        "data_source": "Adzuna (real geo jobs)"
     }
