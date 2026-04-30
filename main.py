@@ -1,40 +1,60 @@
 import json
+import requests
 from fastapi import FastAPI, Request
+from datetime import datetime
 from google.cloud import firestore
 
 app = FastAPI()
 
-# ---------------- SAFE FIRESTORE INIT ---------------- #
+# ---------------- FIRESTORE SAFE INIT ---------------- #
 try:
     db = firestore.Client()
 except Exception:
-    db = None  # prevents Cloud Run crash
+    db = None
 
-# ---------------- MOCK DATA ---------------- #
-JOBS = [
-    {"id": "1", "company": "Google", "title": "Software Intern", "location": "NYC"},
-    {"id": "2", "company": "Amazon", "title": "SDE Intern", "location": "Seattle"},
-    {"id": "3", "company": "Meta", "title": "ML Intern", "location": "NYC"},
-]
-
-# ---------------- TOOLS ---------------- #
+# ---------------- REAL-TIME JOB FETCH ---------------- #
 
 def fetch_jobs(role="", location=""):
-    role = role.lower()
-    location = location.lower()
+    """
+    Fetch REAL jobs from Remotive API (live data)
+    """
+    try:
+        url = "https://remotive.com/api/remote-jobs"
+        res = requests.get(url, timeout=5)
+        data = res.json()
 
-    results = [
-        j for j in JOBS
-        if role in j["title"].lower()
-        and location in j["location"].lower()
-    ]
+        jobs = data.get("jobs", [])
 
-    return {"jobs": results}
+        # filter live data
+        filtered = []
+        for j in jobs:
+            title = j.get("title", "").lower()
 
+            if role.lower() in title:
+                filtered.append({
+                    "title": j.get("title"),
+                    "company": j.get("company_name"),
+                    "location": j.get("candidate_required_location"),
+                    "url": j.get("url")
+                })
+
+        return {
+            "count": len(filtered),
+            "jobs": filtered[:10],
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        return {
+            "error": "job fetch failed",
+            "details": str(e)
+        }
+
+# ---------------- APPLICATION TRACKING ---------------- #
 
 def sync_pipeline(action="", job_id="", company="", title="", status=""):
     if db is None:
-        return {"error": "Firestore not initialized"}
+        return {"error": "Firestore not available"}
 
     ref = db.collection("applications").document(job_id)
 
@@ -43,7 +63,8 @@ def sync_pipeline(action="", job_id="", company="", title="", status=""):
             "job_id": job_id,
             "company": company,
             "title": title,
-            "status": "saved"
+            "status": "saved",
+            "created_at": datetime.utcnow().isoformat()
         })
         return {"status": "created"}
 
@@ -60,13 +81,14 @@ def sync_pipeline(action="", job_id="", company="", title="", status=""):
 
     return {"error": "invalid action"}
 
+# ---------------- TOOLS REGISTRY ---------------- #
 
 TOOLS = {
     "fetch_jobs": fetch_jobs,
     "sync_pipeline": sync_pipeline
 }
 
-# ---------------- MCP ENDPOINT ---------------- #
+# ---------------- MCP SERVER ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
@@ -76,7 +98,7 @@ async def mcp(request: Request):
         req_id = body.get("id")
         params = body.get("params", {})
 
-        # ---------------- INITIALIZE ---------------- #
+        # ---------------- INIT ---------------- #
         if method == "initialize":
             return {
                 "jsonrpc": "2.0",
@@ -86,7 +108,7 @@ async def mcp(request: Request):
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "career-mcp",
-                        "version": "1.0.0"
+                        "version": "2.0.0"
                     }
                 }
             }
@@ -100,7 +122,7 @@ async def mcp(request: Request):
                     "tools": [
                         {
                             "name": "fetch_jobs",
-                            "description": "Find internships/jobs",
+                            "description": "Get real-time remote jobs",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -111,7 +133,7 @@ async def mcp(request: Request):
                         },
                         {
                             "name": "sync_pipeline",
-                            "description": "Track applications",
+                            "description": "Track job applications",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -129,26 +151,21 @@ async def mcp(request: Request):
 
         # ---------------- TOOL CALL ---------------- #
         if method == "tools/call":
-            tool_name = params.get("name")
+            name = params.get("name")
             args = params.get("arguments", {})
 
-            if tool_name not in TOOLS:
+            if name not in TOOLS:
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "content": [
-                            {"type": "text", "text": "Unknown tool"}
-                        ],
+                        "content": [{"type": "text", "text": "Unknown tool"}],
                         "isError": True
                     }
                 }
 
             try:
-                result = TOOLS[tool_name](**args)
-
-                # 🔥 SAFE OUTPUT (NO DOUBLE JSON ENCODING)
-                pretty_text = json.dumps(result, indent=2)
+                result = TOOLS[name](**args)
 
                 return {
                     "jsonrpc": "2.0",
@@ -157,7 +174,7 @@ async def mcp(request: Request):
                         "content": [
                             {
                                 "type": "text",
-                                "text": pretty_text
+                                "text": json.dumps(result, indent=2)
                             }
                         ],
                         "isError": False
@@ -170,34 +187,29 @@ async def mcp(request: Request):
                     "id": req_id,
                     "result": {
                         "content": [
-                            {"type": "text", "text": f"Tool error: {str(e)}"}
+                            {"type": "text", "text": str(e)}
                         ],
                         "isError": True
                     }
                 }
 
-        # ---------------- UNKNOWN METHOD ---------------- #
         return {
             "jsonrpc": "2.0",
             "id": req_id,
-            "error": {
-                "code": -32601,
-                "message": "Method not found"
-            }
+            "error": {"code": -32601, "message": "Method not found"}
         }
 
     except Exception as e:
         return {
             "jsonrpc": "2.0",
             "id": None,
-            "error": {
-                "code": -32000,
-                "message": str(e)
-            }
+            "error": {"code": -32000, "message": str(e)}
         }
-
 
 # ---------------- HEALTH ---------------- #
 @app.get("/")
 def root():
-    return {"status": "MCP SERVER OK"}
+    return {
+        "status": "MCP RUNNING",
+        "mode": "REAL-TIME JOB API"
+    }
