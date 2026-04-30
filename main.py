@@ -17,17 +17,16 @@ except Exception:
 ADZUNA_APP_ID = "723844d0"
 ADZUNA_APP_KEY = "c06ef9a282048c61a5acf06a754c30a2"
 
-# ---------------- NORMALIZATION ---------------- #
 
+# ---------------- UTIL ---------------- #
 def normalize(text: str):
     return (text or "").lower().strip()
 
 
-# ---------------- GEO JOB SEARCH (REAL) ---------------- #
-
-def fetch_jobs(role="", location="new york"):
+# ---------------- REAL GEO JOB SEARCH ---------------- #
+def fetch_jobs(role="", location=""):
     """
-    Real geo-based job search using Adzuna API
+    Real location-based job search using Adzuna API
     """
 
     if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
@@ -35,8 +34,7 @@ def fetch_jobs(role="", location="new york"):
             "error": "Missing ADZUNA_APP_ID or ADZUNA_APP_KEY"
         }
 
-    role = role or "software engineer"
-    location = location or "new york"
+   
 
     try:
         url = (
@@ -52,10 +50,11 @@ def fetch_jobs(role="", location="new york"):
         res = requests.get(url, timeout=10)
         data = res.json()
 
-        results = []
+        jobs = []
 
         for job in data.get("results", []):
-            results.append({
+            jobs.append({
+                "job_id": job.get("redirect_url"),
                 "title": job.get("title"),
                 "company": job.get("company", {}).get("display_name"),
                 "location": job.get("location", {}).get("display_name"),
@@ -69,8 +68,8 @@ def fetch_jobs(role="", location="new york"):
                 "role": role,
                 "location": location
             },
-            "count": len(results),
-            "jobs": results,
+            "count": len(jobs),
+            "jobs": jobs,
             "updated_at": datetime.utcnow().isoformat()
         }
 
@@ -81,40 +80,50 @@ def fetch_jobs(role="", location="new york"):
         }
 
 
-# ---------------- APPLICATION TRACKING ---------------- #
-
+# ---------------- APPLICATION PIPELINE ---------------- #
 def sync_pipeline(action="", job_id="", company="", title="", status=""):
     if db is None:
         return {"error": "Firestore not available"}
 
+    if action != "list" and not job_id:
+        return {"error": "job_id required for create/update"}
+
     ref = db.collection("applications").document(job_id)
 
-    if action == "create":
-        ref.set({
-            "job_id": job_id,
-            "company": company,
-            "title": title,
-            "status": "saved",
-            "created_at": datetime.utcnow().isoformat()
-        })
-        return {"status": "created"}
+    try:
+        if action == "create":
+            ref.set({
+                "job_id": job_id,
+                "company": company,
+                "title": title,
+                "status": "saved",
+                "created_at": datetime.utcnow().isoformat()
+            })
+            return {"status": "created", "job_id": job_id}
 
-    if action == "update":
-        ref.update({"status": status})
-        return {"status": "updated"}
+        if action == "update":
+            ref.update({
+                "status": status,
+                "updated_at": datetime.utcnow().isoformat()
+            })
+            return {"status": "updated", "job_id": job_id}
 
-    if action == "list":
+        if action == "list":
+            docs = db.collection("applications").stream()
+            return {
+                "applications": [d.to_dict() for d in docs]
+            }
+
+        return {"error": "invalid action"}
+
+    except Exception as e:
         return {
-            "applications": [
-                d.to_dict() for d in db.collection("applications").stream()
-            ]
+            "error": "sync_pipeline_failed",
+            "details": str(e)
         }
 
-    return {"error": "invalid action"}
 
-
-# ---------------- TOOLS ---------------- #
-
+# ---------------- TOOL REGISTRY ---------------- #
 TOOLS = {
     "fetch_jobs": fetch_jobs,
     "sync_pipeline": sync_pipeline
@@ -122,7 +131,6 @@ TOOLS = {
 
 
 # ---------------- MCP ENDPOINT ---------------- #
-
 @app.post("/mcp")
 async def mcp(request: Request):
     try:
@@ -142,7 +150,7 @@ async def mcp(request: Request):
                     "capabilities": {"tools": {}},
                     "serverInfo": {
                         "name": "career-mcp",
-                        "version": "5.0.0"
+                        "version": "6.0.0"
                     }
                 }
             }
@@ -156,7 +164,7 @@ async def mcp(request: Request):
                     "tools": [
                         {
                             "name": "fetch_jobs",
-                            "description": "Find real location-based jobs using Adzuna API",
+                            "description": "Get real location-based jobs using Adzuna API",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
@@ -167,11 +175,14 @@ async def mcp(request: Request):
                         },
                         {
                             "name": "sync_pipeline",
-                            "description": "Track job applications",
+                            "description": "Create, update, or list job applications",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "action": {"type": "string"},
+                                    "action": {
+                                        "type": "string",
+                                        "enum": ["create", "update", "list"]
+                                    },
                                     "job_id": {"type": "string"},
                                     "company": {"type": "string"},
                                     "title": {"type": "string"},
@@ -203,7 +214,7 @@ async def mcp(request: Request):
 
             result = TOOLS[name](**args)
 
-            # ---------------- AGENT-STUDIO SAFE OUTPUT ---------------- #
+            # ---------------- AGENT FRIENDLY OUTPUT ---------------- #
             if name == "fetch_jobs":
                 jobs = result.get("jobs", [])
 
@@ -213,21 +224,19 @@ No exact matches found for:
 Role: {result.get('query', {}).get('role')}
 Location: {result.get('query', {}).get('location')}
 
-Try broadening your search (e.g., "software", "engineer", or nearby cities).
+Tip: Try broader search terms like "software engineer" or nearby cities.
 """
                 else:
                     text = f"""
-Found {len(jobs)} real jobs via Adzuna:
+Found {len(jobs)} real jobs (Adzuna):
 
 """ + "\n".join(
     f"- {j['title']} at {j['company']} ({j['location']})"
     for j in jobs[:10]
 )
 
-                response_text = text
-
             else:
-                response_text = json.dumps(result, indent=2)
+                text = json.dumps(result, indent=2)
 
             return {
                 "jsonrpc": "2.0",
@@ -236,7 +245,7 @@ Found {len(jobs)} real jobs via Adzuna:
                     "content": [
                         {
                             "type": "text",
-                            "text": response_text
+                            "text": text
                         }
                     ],
                     "isError": False
@@ -269,6 +278,6 @@ Found {len(jobs)} real jobs via Adzuna:
 def root():
     return {
         "status": "MCP RUNNING",
-        "version": "5.0.0",
+        "version": "6.0.0",
         "data_source": "Adzuna (real geo jobs)"
     }
