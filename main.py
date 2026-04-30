@@ -13,14 +13,24 @@ try:
 except Exception:
     db = None
 
-# ---------------- ADZUNA ---------------- #
+
+# ---------------- ADZUNA CONFIG ---------------- #
 ADZUNA_APP_ID = "723844d0"
 ADZUNA_APP_KEY = "c06ef9a282048c61a5acf06a754c30a2"
 
+
 # ---------------- HELPERS ---------------- #
 
-def make_safe_id(url: str):
+def safe_id(url: str):
     return (url or "").replace("/", "_")
+
+
+def to_text(data: dict) -> str:
+    """Agent Studio SAFE serialization"""
+    try:
+        return json.dumps(data, indent=2)
+    except Exception:
+        return json.dumps({"error": "serialization_failed"})
 
 
 # ---------------- REAL JOB SEARCH ---------------- #
@@ -41,7 +51,8 @@ def fetch_jobs(role="", location=""):
             f"&content-type=application/json"
         )
 
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, timeout=8)
+        res.raise_for_status()
         data = res.json()
 
         jobs = []
@@ -50,7 +61,7 @@ def fetch_jobs(role="", location=""):
             job_url = job.get("redirect_url")
 
             jobs.append({
-                "id": make_safe_id(job_url),   # stable ID
+                "job_id": safe_id(job_url),
                 "title": job.get("title"),
                 "company": job.get("company", {}).get("display_name"),
                 "location": job.get("location", {}).get("display_name"),
@@ -83,8 +94,7 @@ def sync_pipeline(action="", job_id="", company="", title="", status=""):
     if action != "list" and not job_id:
         return {"error": "job_id required"}
 
-    safe_id = make_safe_id(job_id)
-    ref = db.collection("applications").document(safe_id)
+    ref = db.collection("applications").document(safe_id(job_id))
 
     try:
         if action == "create":
@@ -95,14 +105,14 @@ def sync_pipeline(action="", job_id="", company="", title="", status=""):
                 "status": "saved",
                 "created_at": datetime.utcnow().isoformat()
             })
-            return {"status": "created", "job_id": job_id}
+            return {"status": "created"}
 
         if action == "update":
             ref.update({
                 "status": status,
                 "updated_at": datetime.utcnow().isoformat()
             })
-            return {"status": "updated", "job_id": job_id}
+            return {"status": "updated"}
 
         if action == "list":
             docs = db.collection("applications").stream()
@@ -127,7 +137,7 @@ TOOLS = {
 }
 
 
-# ---------------- MCP ---------------- #
+# ---------------- MCP ENDPOINT ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
@@ -147,7 +157,7 @@ async def mcp(request: Request):
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "career-mcp",
-                    "version": "7.0.0"
+                    "version": "8.0.0"
                 }
             }
         }
@@ -161,7 +171,7 @@ async def mcp(request: Request):
                 "tools": [
                     {
                         "name": "fetch_jobs",
-                        "description": "Get real geo-based jobs using Adzuna",
+                        "description": "Get real geo-based jobs via Adzuna",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -201,37 +211,28 @@ async def mcp(request: Request):
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "content": [{"type": "text", "text": "Unknown tool"}],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Unknown tool"
+                        }
+                    ],
                     "isError": True
                 }
             }
 
         result = TOOLS[name](**args)
 
-        # ---------------- FIX: STRUCTURED OUTPUT FOR LINKS ---------------- #
+        # ---------------- SAFE OUTPUT (CRITICAL FIX) ---------------- #
         if name == "fetch_jobs":
-            jobs = result.get("jobs", [])
-
-            structured_jobs = [
-                {
-                    "type": "job",
-                    "title": j["title"],
-                    "company": j["company"],
-                    "location": j["location"],
-                    "url": j["url"]   # ✅ CRITICAL: explicit field for Agent Studio
-                }
-                for j in jobs[:10]
-            ]
-
-            response = {
+            text = to_text({
                 "query": result.get("query"),
-                "count": len(jobs),
-                "jobs": structured_jobs,
-                "note": "Click 'url' field to open job listing"
-            }
-
+                "count": result.get("count"),
+                "jobs": result.get("jobs", [])[:10],
+                "note": "Each job includes a clickable 'url' field"
+            })
         else:
-            response = result
+            text = to_text(result)
 
         return {
             "jsonrpc": "2.0",
@@ -239,8 +240,8 @@ async def mcp(request: Request):
             "result": {
                 "content": [
                     {
-                        "type": "json",
-                        "json": response
+                        "type": "text",
+                        "text": text
                     }
                 ],
                 "isError": False
@@ -263,6 +264,12 @@ async def mcp(request: Request):
 def root():
     return {
         "status": "MCP RUNNING",
-        "version": "7.0.0",
-        "links": "FIXED (structured URLs enabled)"
+        "version": "8.0.0",
+        "fixes": [
+            "no json content type",
+            "agent studio safe",
+            "adzuna geo jobs",
+            "stable links",
+            "no internal errors"
+        ]
     }
