@@ -7,33 +7,27 @@ from google.cloud import firestore
 
 app = FastAPI()
 
-# ---------------- FIRESTORE SAFE INIT ---------------- #
+# ---------------- FIRESTORE ---------------- #
 try:
     db = firestore.Client()
 except Exception:
     db = None
 
-# ---------------- ADZUNA CONFIG ---------------- #
+# ---------------- ADZUNA ---------------- #
 ADZUNA_APP_ID = "723844d0"
 ADZUNA_APP_KEY = "c06ef9a282048c61a5acf06a754c30a2"
 
 # ---------------- HELPERS ---------------- #
 
-def normalize(text: str):
-    return (text or "").lower().strip()
-
-
 def make_safe_id(url: str):
-    # Firestore cannot accept "/" in doc IDs
     return (url or "").replace("/", "_")
 
 
-# ---------------- REAL GEO JOB SEARCH ---------------- #
+# ---------------- REAL JOB SEARCH ---------------- #
 
 def fetch_jobs(role="", location=""):
     if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
         return {"error": "Missing Adzuna credentials"}
-
 
 
     try:
@@ -50,18 +44,16 @@ def fetch_jobs(role="", location=""):
         res = requests.get(url, timeout=10)
         data = res.json()
 
-        results = []
+        jobs = []
 
         for job in data.get("results", []):
             job_url = job.get("redirect_url")
 
-            results.append({
-                "job_id": job_url,  # ✅ FIX: stable unique ID
+            jobs.append({
+                "id": make_safe_id(job_url),   # stable ID
                 "title": job.get("title"),
                 "company": job.get("company", {}).get("display_name"),
                 "location": job.get("location", {}).get("display_name"),
-                "salary_min": job.get("salary_min"),
-                "salary_max": job.get("salary_max"),
                 "url": job_url
             })
 
@@ -70,8 +62,8 @@ def fetch_jobs(role="", location=""):
                 "role": role,
                 "location": location
             },
-            "count": len(results),
-            "jobs": results,
+            "count": len(jobs),
+            "jobs": jobs,
             "updated_at": datetime.utcnow().isoformat()
         }
 
@@ -82,7 +74,7 @@ def fetch_jobs(role="", location=""):
         }
 
 
-# ---------------- APPLICATION PIPELINE ---------------- #
+# ---------------- PIPELINE ---------------- #
 
 def sync_pipeline(action="", job_id="", company="", title="", status=""):
     if db is None:
@@ -135,7 +127,7 @@ TOOLS = {
 }
 
 
-# ---------------- MCP SERVER ---------------- #
+# ---------------- MCP ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
@@ -155,7 +147,7 @@ async def mcp(request: Request):
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "career-mcp",
-                    "version": "6.0.0"
+                    "version": "7.0.0"
                 }
             }
         }
@@ -169,7 +161,7 @@ async def mcp(request: Request):
                 "tools": [
                     {
                         "name": "fetch_jobs",
-                        "description": "Get real geo-based jobs using Adzuna API",
+                        "description": "Get real geo-based jobs using Adzuna",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -180,7 +172,7 @@ async def mcp(request: Request):
                     },
                     {
                         "name": "sync_pipeline",
-                        "description": "Create/update/list job applications",
+                        "description": "Track job applications",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -216,26 +208,30 @@ async def mcp(request: Request):
 
         result = TOOLS[name](**args)
 
-        # ---------------- AGENT-STUDIO FRIENDLY OUTPUT ---------------- #
+        # ---------------- FIX: STRUCTURED OUTPUT FOR LINKS ---------------- #
         if name == "fetch_jobs":
             jobs = result.get("jobs", [])
 
-            if not jobs:
-                text = f"""
-No jobs found for:
-Role: {result.get('query', {}).get('role')}
-Location: {result.get('query', {}).get('location')}
+            structured_jobs = [
+                {
+                    "type": "job",
+                    "title": j["title"],
+                    "company": j["company"],
+                    "location": j["location"],
+                    "url": j["url"]   # ✅ CRITICAL: explicit field for Agent Studio
+                }
+                for j in jobs[:10]
+            ]
 
-Try broader terms like "engineer" or nearby cities.
-"""
-            else:
-                text = "Found jobs:\n\n" + "\n".join(
-                    f"- {j['title']} at {j['company']} ({j['location']})"
-                    for j in jobs[:10]
-                )
+            response = {
+                "query": result.get("query"),
+                "count": len(jobs),
+                "jobs": structured_jobs,
+                "note": "Click 'url' field to open job listing"
+            }
 
         else:
-            text = json.dumps(result, indent=2)
+            response = result
 
         return {
             "jsonrpc": "2.0",
@@ -243,8 +239,8 @@ Try broader terms like "engineer" or nearby cities.
             "result": {
                 "content": [
                     {
-                        "type": "text",
-                        "text": text
+                        "type": "json",
+                        "json": response
                     }
                 ],
                 "isError": False
@@ -267,6 +263,6 @@ Try broader terms like "engineer" or nearby cities.
 def root():
     return {
         "status": "MCP RUNNING",
-        "version": "6.0.0",
-        "job_source": "Adzuna (geo-based real jobs)"
+        "version": "7.0.0",
+        "links": "FIXED (structured URLs enabled)"
     }
