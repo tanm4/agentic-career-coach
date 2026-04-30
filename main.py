@@ -1,13 +1,16 @@
 import json
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
 from google.cloud import firestore
 
 app = FastAPI()
-db = firestore.Client()
 
-# ---------------- DATA ---------------- #
+# ---------------- SAFE FIRESTORE INIT ---------------- #
+try:
+    db = firestore.Client()
+except Exception:
+    db = None  # prevents Cloud Run crash
 
+# ---------------- MOCK DATA ---------------- #
 JOBS = [
     {"id": "1", "company": "Google", "title": "Software Intern", "location": "NYC"},
     {"id": "2", "company": "Amazon", "title": "SDE Intern", "location": "Seattle"},
@@ -20,15 +23,19 @@ def fetch_jobs(role="", location=""):
     role = role.lower()
     location = location.lower()
 
-    return {
-        "jobs": [
-            j for j in JOBS
-            if role in j["title"].lower()
-            and location in j["location"].lower()
-        ]
-    }
+    results = [
+        j for j in JOBS
+        if role in j["title"].lower()
+        and location in j["location"].lower()
+    ]
 
-def sync_pipeline(action, job_id="", company="", title="", status=""):
+    return {"jobs": results}
+
+
+def sync_pipeline(action="", job_id="", company="", title="", status=""):
+    if db is None:
+        return {"error": "Firestore not initialized"}
+
     ref = db.collection("applications").document(job_id)
 
     if action == "create":
@@ -53,112 +60,144 @@ def sync_pipeline(action, job_id="", company="", title="", status=""):
 
     return {"error": "invalid action"}
 
+
 TOOLS = {
     "fetch_jobs": fetch_jobs,
     "sync_pipeline": sync_pipeline
 }
 
-# ---------------- MCP ---------------- #
+# ---------------- MCP ENDPOINT ---------------- #
 
 @app.post("/mcp")
 async def mcp(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+        method = body.get("method")
+        req_id = body.get("id")
+        params = body.get("params", {})
 
-    method = body.get("method")
-    req_id = body.get("id")
-    params = body.get("params", {})
-
-    # ---------------- initialize ---------------- #
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "career-coach-mcp",
-                    "version": "1.0.0"
-                }
-            }
-        }
-
-    # ---------------- list tools ---------------- #
-    if method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "fetch_jobs",
-                        "description": "Find internships/jobs",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "role": {"type": "string"},
-                                "location": {"type": "string"}
-                            }
-                        }
-                    },
-                    {
-                        "name": "sync_pipeline",
-                        "description": "Track applications",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "action": {"type": "string"},
-                                "job_id": {"type": "string"},
-                                "company": {"type": "string"},
-                                "title": {"type": "string"},
-                                "status": {"type": "string"}
-                            }
-                        }
-                    }
-                ]
-            }
-        }
-
-    # ---------------- call tool ---------------- #
-    if method == "tools/call":
-        tool = params.get("name")
-        args = params.get("arguments", {})
-
-        if tool in TOOLS:
-            result = TOOLS[tool](**args)
-
+        # ---------------- INITIALIZE ---------------- #
+        if method == "initialize":
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {
-                    "content": [
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {
+                        "name": "career-mcp",
+                        "version": "1.0.0"
+                    }
+                }
+            }
+
+        # ---------------- TOOLS LIST ---------------- #
+        if method == "tools/list":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "tools": [
                         {
-                            "type": "text",
-                            "text": json.dumps(result)
+                            "name": "fetch_jobs",
+                            "description": "Find internships/jobs",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "role": {"type": "string"},
+                                    "location": {"type": "string"}
+                                }
+                            }
+                        },
+                        {
+                            "name": "sync_pipeline",
+                            "description": "Track applications",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string"},
+                                    "job_id": {"type": "string"},
+                                    "company": {"type": "string"},
+                                    "title": {"type": "string"},
+                                    "status": {"type": "string"}
+                                }
+                            }
                         }
                     ]
                 }
             }
 
-    return JSONResponse(
-        status_code=400,
-        content={"error": "Unknown MCP method"}
-    )
+        # ---------------- TOOL CALL ---------------- #
+        if method == "tools/call":
+            tool_name = params.get("name")
+            args = params.get("arguments", {})
 
-# ---------------- SSE ---------------- #
+            if tool_name not in TOOLS:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": "Unknown tool"}
+                        ],
+                        "isError": True
+                    }
+                }
 
-@app.get("/sse")
-async def sse():
-    async def stream():
-        while True:
-            yield "data: connected\n\n"
+            try:
+                result = TOOLS[tool_name](**args)
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+                # 🔥 SAFE OUTPUT (NO DOUBLE JSON ENCODING)
+                pretty_text = json.dumps(result, indent=2)
 
-# ---------------- ROOT ---------------- #
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": pretty_text
+                            }
+                        ],
+                        "isError": False
+                    }
+                }
 
+            except Exception as e:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": f"Tool error: {str(e)}"}
+                        ],
+                        "isError": True
+                    }
+                }
+
+        # ---------------- UNKNOWN METHOD ---------------- #
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {
+                "code": -32601,
+                "message": "Method not found"
+            }
+        }
+
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32000,
+                "message": str(e)
+            }
+        }
+
+
+# ---------------- HEALTH ---------------- #
 @app.get("/")
 def root():
-    return {"status": "MCP READY"}
+    return {"status": "MCP SERVER OK"}
